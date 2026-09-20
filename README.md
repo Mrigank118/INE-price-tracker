@@ -405,8 +405,8 @@ DESIGN_NOTE.md
 
 ## Submission
 
-- **Live App:** `<VERCEL_URL>`
-- **Backend:** `<RENDER_URL>`
-- **GitHub:** `<GITHUB_REPOSITORY_URL>`
-- **Recording:** `<RECORDING_URL>`
+- **Live App:** `https://ine-price-tracker.vercel.app`
+- **Backend:** `https://ine-price-tracker-3hz4.onrender.com`
+- **GitHub:** `https://github.com/Mrigank118/INE-price-tracker/`
+- **Recording:** `https://drive.google.com/file/d/1qtS9IO3dkCHVbfmP18wiQNe_xhyz-R-o/view?usp=sharing`
 - **Design Note:** `DESIGN_NOTE.md`
