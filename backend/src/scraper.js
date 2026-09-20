@@ -292,41 +292,74 @@ async function runBrowserScrapeAttempt(url, options = {}) {
 
       if (looksLoaded) {
         // Extract real price and stock from DOM
-        const domResult = await page.evaluate(() => {
-          const main = document.querySelector('.price-main');
-          if (!main) return null;
+    const domResult = await page.evaluate(() => {
+  const priceBlock = document.querySelector('.price-block');
+  const priceMain = document.querySelector('.price-main');
 
-          // Filter visible price spans, strictly excluding fake decoys and crossed-out MRPs
-          const visibleSpans = Array.from(main.querySelectorAll('span')).filter((s) => {
-            const style = window.getComputedStyle(s);
-            const isHidden = style.display === 'none' || style.visibility === 'hidden' || s.getAttribute('aria-hidden') === 'true' || s.getAttribute('data-price') === 'true';
-            const isMrp = style.textDecoration.includes('line-through') || s.className.includes('mrp');
-            const isBadge = s.className.includes('badge') || s.innerText.includes('% off') || s.innerText.includes('Updating');
-            return !isHidden && !isMrp && !isBadge;
-          });
+  if (!priceBlock) return null;
 
-          // Primary price element has largest font size
-          let bestSpan = visibleSpans[0];
-          let maxFontSize = 0;
-          for (const s of visibleSpans) {
-            const fs = parseFloat(window.getComputedStyle(s).fontSize) || 0;
-            if (fs > maxFontSize) {
-              maxFontSize = fs;
-              bestSpan = s;
-            }
-          }
+  // The live/current price is marked by data-price="true" on the
+  // INE storefront. Prefer that exact element.
+  const dataPrice = priceBlock.querySelector('[data-price="true"]');
 
-          const rawPriceText = bestSpan ? bestSpan.innerText.replace(/[\u200B\u00A0]/g, ' ').trim() : null;
+  if (dataPrice) {
+    const style = window.getComputedStyle(dataPrice);
 
-          const stockBadge = document.querySelector('.stock-badge');
-          const rawStockText = stockBadge ? stockBadge.innerText.trim() : null;
+    const visible =
+      style.display !== 'none' &&
+      style.visibility !== 'hidden' &&
+      style.opacity !== '0' &&
+      dataPrice.getAttribute('aria-hidden') !== 'true';
 
-          return { rawPriceText, rawStockText };
-        });
+    if (visible) {
+      const text = (
+        dataPrice.innerText ||
+        dataPrice.textContent ||
+        ''
+      ).trim();
+
+      if (text) {
+        const stockBadge = document.querySelector('.stock-badge');
+
+        return {
+          rawPriceText: text,
+          rawStockText: stockBadge
+            ? (stockBadge.innerText || stockBadge.textContent || '').trim()
+            : null,
+          priceBlockText: priceBlock.innerText || ''
+        };
+      }
+    }
+  }
+
+  // Fallback: look for a visible monetary value in the price block.
+  const text = priceMain?.innerText || priceBlock.innerText || '';
+
+  // Prefer values with an explicit currency symbol.
+  const currencyMatch = text.match(
+    /(?:₹|€|\$|£)\s*[\d,]+(?:\.\d{1,2})?/ 
+  );
+
+  if (currencyMatch) {
+    const stockBadge = document.querySelector('.stock-badge');
+
+    return {
+      rawPriceText: currencyMatch[0],
+      rawStockText: stockBadge
+        ? (stockBadge.innerText || stockBadge.textContent || '').trim()
+        : null,
+      priceBlockText: text
+    };
+  }
+
+  return null;
+});
 
         if (domResult?.rawPriceText) {
           const parsed = parsePrice(domResult.rawPriceText);
-          const currency = detectCurrency(domResult.rawPriceText);
+         const currency = detectCurrency(
+  `${domResult.rawPriceText || ''} ${domResult.priceBlockText || ''}`
+);
           const stock = normaliseStock(domResult.rawStockText) || 'in_stock';
 
           if (parsed != null && parsed > 0) {
