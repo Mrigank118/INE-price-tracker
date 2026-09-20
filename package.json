@@ -1,0 +1,8 @@
+{
+  "name": "ine-price-tracker",
+  "private": true,
+  "scripts": {
+    "backend:install": "npm --prefix backend install",
+    "frontend:install": "npm --prefix frontend install"
+  }
+}
