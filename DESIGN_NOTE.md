@@ -5,20 +5,26 @@
 The INE Product Price Tracker is a full-stack monitoring system designed specifically to track product pricing and inventory changes on the INE mock storefront (`https://demo.inelabteamdev.com/`).
 
 The system consists of four decoupled layers:
-1. **Frontend**: React (Vite) single-page application deployed to **Vercel**. Provides live debounced product search, real-time tracking, metrics dashboard, SVG price trend visualization, and transparent per-attempt observability logs.
+
+1. **Frontend**: React (Vite) single-page application deployed to **Vercel**. Provides live debounced product search, product tracking, configurable scrape frequency, metrics dashboard, price trend visualization, structure-change status, and transparent per-attempt observability logs.
+
 2. **Backend API**: Node.js (Express) REST service deployed to **Render**. Exposes endpoints for catalog search, tracking management, manual scraping, and authenticated cron triggers.
+
 3. **Database**: Managed PostgreSQL hosted on **Supabase** via `@supabase/supabase-js`, with tables for `tracked_products`, `price_history`, and `scrape_logs`, protected with cascade constraints and Row Level Security.
-4. **External Scheduler**: A trigger configured on **cron-job.org** calling `POST /api/cron/scrape` every 2 hours with Bearer token authentication.
+
+4. **External Scheduler**: A trigger configured on **cron-job.org** calling `POST /api/cron/scrape` with Bearer token authentication. The endpoint acknowledges the request immediately with HTTP 202 and starts the scrape batch in the background, avoiding cron-job timeouts while the Render service performs the actual work.
 
 ```mermaid
 flowchart TD
-    Cron["cron-job.org (Every 2h)"] -->|"POST /api/cron/scrape + Bearer Secret"| API["Express API (Render)"]
+    Cron["cron-job.org (External Scheduler)"] -->|"POST /api/cron/scrape + Bearer Secret"| API["Express API (Render)"]
     User["User Browser"] -->|"HTTPS"| Web["React Web App (Vercel)"]
     Web -->|"REST API Calls"| API
     API -->|"1. Query /api/catalog (Cached)"| Catalog["Storefront Catalog"]
     API -->|"2. Playwright Headless / Chromium"| Store["INE Storefront (demo.inelabteamdev.com)"]
     Store -->|"Anti-bot Challenge / WebAssembly / Decryption"| API
-    API -->|"Validated Insert & Logs"| Supabase[("Supabase PostgreSQL")]
+    API -->|"Accepted 202 + Background Scrape"| Worker["Scrape Batch"]
+    Worker -->|"Validated Insert & Logs"| Supabase[("Supabase PostgreSQL")]
+    API -->|"Alert Events"| Alerts["SendGrid Email (Optional)"]
 ```
 
 ---
@@ -28,24 +34,44 @@ flowchart TD
 The core evaluation criterion is **scraping reliability** against an intentionally adversarial storefront.
 
 ### Lightweight HTTP-First Layer
+
 Where static HTML or structured data is genuinely present (e.g. standard JSON-LD, metadata), a fast HTTP `fetch()` with Cheerio parsing is executed first.
+
 - If all required fields (`name`, `price`, `stock`, `currency`) pass strict schema validation, the scrape succeeds in under 200ms without spinning up a browser instance.
 - However, on the real INE mock store, prices are intentionally omitted from initial server HTML and product listing pages (`<div id="root"></div>` client-rendered SPA).
 
 ### Playwright Automation Layer
+
 When lightweight HTTP extraction cannot yield a valid, confirmed price, the system transitions to Playwright with Chromium. Playwright is required because:
+
 1. **Hidden-Price State**: The store hides the price behind a `"Price hidden"` element and `"Reveal price"` button that is initially disabled.
+
 2. **Human-like Mouse Dwell Interaction**: The store's JavaScript requires tracking at least 8 mouse movements spaced by ≥40ms with a total dwell time exceeding 600ms before unlocking the `"Reveal price"` control.
+
 3. **Adversarial Click Handling**: The store wraps button callbacks in `Xn()`, which randomly discards 17.5% of clicks and delays others by 900ms. Playwright monitors DOM state transitions and re-clicks if the action was dropped.
+
 4. **Disruptive Popups**: The store injects an asynchronous cookie modal (`.cookie-overlay`) that locks `body` scroll and intercepts pointer events. The scraper injects styles to disable overlays and restore pointer events.
-5. **Decoy Element Trap**: The store injects deceptive numbers inside `<span class="price-value" aria-hidden="true">` and `<span class="amount" data-price="true">`. The scraper's DOM extractor explicitly filters out all hidden and decoy elements, extracting solely the computed visible selling price element.
+
+5. **Decoy Element Trap**: The store can inject hidden/decoy price values, including elements marked `aria-hidden="true"` or hidden by CSS. The scraper checks computed visibility and prefers the visible `[data-price="true"]` element inside the price block, with a currency-symbol fallback restricted to the price block. This prevents unrelated numbers such as retry counts or MRP text from being recorded as the selling price.
 
 ---
 
-## 3. Challenge Handling, Timeouts & Bounded Retries
+## 3. Tracking Frequency & Structure-Change Detection
+
+Each tracked product stores its own scrape interval. The supported frequencies are **2 hours, 4 hours, 6 hours, 12 hours, and 24 hours**. The frontend exposes this setting per tracked product and the backend validates the value before persisting it.
+
+The cron worker does not blindly scrape every tracked product on every scheduler invocation. For each enabled product it calculates whether the product is due from `last_scraped_at + scrape_interval_minutes`. Products that are not due are skipped and included in the cron summary. This allows a single external scheduler to support different product frequencies without creating separate cron jobs.
+
+The scraper also records a normalized **structure signature** for the price/stock DOM. When a successful scrape produces a different signature from the previous successful scrape, the product is marked with `structure_changed` and `structure_changed_at`, and the successful scrape log records `STORE_STRUCTURE_CHANGED`. The change is informational: the scrape is still considered successful only when valid price and stock data were extracted. A later stable scrape clears the current `structure_changed` flag while retaining the timestamp of the last detected change.
+
+---
+
+## 4. Challenge Handling, Timeouts & Bounded Retries
 
 ### The Intentional Challenge Failure State
+
 On the real INE store, certain requests encounter an intentional challenge failure or upstream rate-limit:
+
 - `"Couldn't load the price after 1 attempts."`
 - `"challenge_failed"`
 - `"upstream 429"` / `"upstream_error"`
@@ -54,6 +80,7 @@ On the real INE store, certain requests encounter an intentional challenge failu
 **Crucial Policy**: The scraper **never** interprets a challenge failure as price = 0, price = null, or stock = unknown. A failure remains an honest failure.
 
 ### Bounded Retries Policy
+
 - **Maximum Attempts**: 3 attempts per scrape cycle (configurable via `SCRAPER_MAX_ATTEMPTS`).
 - **Backoff Delay**: Jittered exponential backoff (`1000ms * 2^(attempt-1) + jitter`) between retry attempts to respect upstream rate limits.
 - **In-Page vs. Process Retry**: The store's client component exhibits an internal 6-attempt retry loop (`jr = 6`). The scraper detects if the page is actively retrying (`"Retrying (attempt ...)"`) and allows it to complete before declaring an attempt failed. If a `"Try again"` button appears, it triggers an immediate re-attempt.
@@ -61,9 +88,10 @@ On the real INE store, certain requests encounter an intentional challenge failu
 
 ---
 
-## 4. Preventing Corrupted Data & Validation Rules
+## 5. Preventing Corrupted Data & Validation Rules
 
 Before any row is written to `price_history` or updated in `tracked_products`, the payload must satisfy `assertValid`:
+
 1. **Origin Verification**: Target URL must belong strictly to `https://demo.inelabteamdev.com/`. Third-party URLs are rejected with HTTP 400.
 2. **Product Name**: Must be a non-empty string (≥2 characters).
 3. **Numeric Price**: Must be a finite positive number (`price > 0 && price < 1e9`). Values parsed as NaN, 0, or negative are immediately rejected.
@@ -73,22 +101,25 @@ Before any row is written to `price_history` or updated in `tracked_products`, t
 
 ---
 
-## 5. Scheduling, Concurrency & Render Sleeping
+## 6. Scheduling, Concurrency & Render Sleeping
 
 - **Why Not `setInterval`?**: Free and low-tier container instances on Render sleep after periods of inactivity. An in-process `setInterval` stops firing once the instance sleeps.
 - **Production Architecture**: An external scheduler (**cron-job.org**) issues a periodic HTTP request every 2 hours:
+
   ```http
   POST /api/cron/scrape HTTP/1.1
   Host: YOUR-RENDER-SERVICE.onrender.com
   Authorization: Bearer <CRON_SECRET>
   Content-Type: application/json
   ```
+
   The incoming HTTP request wakes the Render instance, triggers the scraping batch, and receives a JSON summary report.
+
 - **Concurrency Guard**: The cron handler processes tracked products in bounded batches (`SCRAPER_CONCURRENCY`, default 2) using an in-memory `Set` mutex (`running`) to prevent duplicate simultaneous runs on the same product ID.
 
 ---
 
-## 6. AI-Assisted Development: Initial Mistakes and Corrections
+## 7. AI-Assisted Development: Initial Mistakes and Corrections
 
 In full transparency, early iterations of this codebase made several flawed assumptions about the storefront. Below is an honest audit of those mistakes and the exact corrections implemented after inspecting the live store DOM:
 
@@ -124,8 +155,16 @@ In full transparency, early iterations of this codebase made several flawed assu
 
 ---
 
-## 7. Trade-offs & Known Limitations
+## 8. Trade-offs & Known Limitations
 
 1. **Headless Browser Overhead**: Running Playwright Chromium consumes more CPU and RAM than pure HTTP parsing. However, because the INE mock store utilizes WebAssembly and dynamic DOM challenges, headless browser execution is genuinely necessary.
+
 2. **In-Memory Concurrency Lock**: In-memory mutexes prevent concurrent scrapes on a single Render instance. In a multi-replica clustered production setup, distributed Redis locks or PostgreSQL advisory locks would be preferred.
+
 3. **Catalog Cache Refresh**: The catalog cache refreshes once every hour. New products added between refresh cycles will be discovered on the subsequent cycle or upon server restart.
+
+4. **Background Cron Execution**: Returning HTTP 202 quickly prevents external scheduler timeouts, but background work is still tied to the lifetime of the Render process. A process restart can interrupt an active batch. A durable queue/worker architecture would remove this limitation.
+
+5. **Optional Alert Delivery**: Email alerts depend on SendGrid connectivity and verified sender configuration. An unavailable email provider does not invalidate the underlying scrape, so alert delivery should be treated as an auxiliary notification channel rather than the source of truth.
+
+6. **Structure Detection Is Advisory**: A structure signature is a compact diagnostic fingerprint, not a full semantic DOM diff. A detected change means the relevant extraction structure differs from the previous successful scrape; it does not by itself mean that scraping has failed.
