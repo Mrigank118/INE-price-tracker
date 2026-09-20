@@ -10,10 +10,14 @@ create table if not exists tracked_products (
   last_price numeric(14,2),
   last_stock text,
   last_scraped_at timestamptz,
+  structure_signature text,
+  structure_changed boolean not null default false,
+  structure_changed_at timestamptz,
   scrape_enabled boolean not null default true,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
 
 create table if not exists price_history (
   id bigserial primary key,
@@ -39,8 +43,14 @@ create table if not exists scrape_logs (
 create index if not exists price_history_product_time_idx on price_history(tracked_product_id, scraped_at desc);
 create index if not exists scrape_logs_product_time_idx on scrape_logs(tracked_product_id, scraped_at desc);
 
-create or replace function set_updated_at() returns trigger language plpgsql as $$
-begin new.updated_at = now(); return new; end;
+create or replace function set_updated_at()
+returns trigger
+language plpgsql
+as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
 $$;
 
 drop trigger if exists tracked_products_updated_at on tracked_products;
