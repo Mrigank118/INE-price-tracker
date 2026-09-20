@@ -1324,7 +1324,7 @@ function ProductPage() {
           >
             {busy
               ? 'Scraping in progress...'
-              : '⚡ Run Scrape Now'}
+              : 'Run Scrape Now'}
           </button>
 
           <button
