@@ -1,20 +1,57 @@
-import { chromium } from 'playwright';
+// import { chromium } from 'playwright';
 import * as cheerio from 'cheerio';
 import { config } from './config.js';
 import { searchCatalog } from './catalog.js';
-
+import { chromium } from 'playwright';
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function cleanText(value) {
-  return String(value ?? '').replace(/[\u200B\u00A0]/g, ' ').replace(/\s+/g, ' ').trim();
+  return String(value ?? '')
+    .replace(/[\u200B\u00A0]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/*
+ * Build a stable signature from the important product-page structure.
+ *
+ * Deliberately excludes price and stock values because those are expected
+ * to change between scrapes.
+ */
+export function buildStructureSignature(snapshot) {
+  const normalized = JSON.stringify({
+    selectors: snapshot?.selectors || [],
+    priceTag: snapshot?.priceTag || null,
+    priceClass: snapshot?.priceClass || null,
+    stockTag: snapshot?.stockTag || null,
+    stockClass: snapshot?.stockClass || null,
+    hasPriceBlock: Boolean(snapshot?.hasPriceBlock),
+    hasDataPrice: Boolean(snapshot?.hasDataPrice),
+    hasStockBadge: Boolean(snapshot?.hasStockBadge)
+  });
+
+  let hash = 0;
+
+  for (let i = 0; i < normalized.length; i++) {
+    hash = ((hash << 5) - hash) + normalized.charCodeAt(i);
+    hash |= 0;
+  }
+
+  return Math.abs(hash).toString(16);
 }
 
 export function parsePrice(raw) {
   if (raw == null) return null;
+
   let text = cleanText(raw)
-    .replace(/[\uFF10-\uFF19]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
-    .replace(/[\u0966-\u096F]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0x0966 + 48))
+    .replace(/[\uFF10-\uFF19]/g, (c) =>
+      String.fromCharCode(c.charCodeAt(0) - 0xFEE0)
+    )
+    .replace(/[\u0966-\u096F]/g, (c) =>
+      String.fromCharCode(c.charCodeAt(0) - 0x0966 + 48)
+    )
     .replace(/[^0-9.,-]/g, '');
+
   if (!text) return null;
 
   const firstDot = text.indexOf('.');
@@ -24,20 +61,20 @@ export function parsePrice(raw) {
 
   if (firstDot !== -1 && firstComma !== -1) {
     if (firstDot < firstComma) {
-      // e.g. 11.989,00 or 1.234.567,89 -> dot is thousands, comma is decimal
       text = text.replace(/\./g, '').replace(',', '.');
     } else {
-      // e.g. 11,989.00 or 1,234,567.89 -> comma is thousands, dot is decimal
       text = text.replace(/,/g, '');
     }
   } else if (firstComma !== -1) {
     const afterComma = text.slice(lastComma + 1);
     const commasCount = (text.match(/,/g) || []).length;
+
     if (commasCount > 1 || afterComma.length === 3) {
-      // e.g. 14,794 or 1,234,567 -> thousands separator
       text = text.replace(/,/g, '');
-    } else if (afterComma.length === 2 || afterComma.length === 1) {
-      // e.g. 14,95 or 14,9 -> decimal separator
+    } else if (
+      afterComma.length === 2 ||
+      afterComma.length === 1
+    ) {
       text = text.replace(',', '.');
     } else {
       text = text.replace(/,/g, '');
@@ -45,35 +82,59 @@ export function parsePrice(raw) {
   } else if (firstDot !== -1) {
     const dotsCount = (text.match(/\./g) || []).length;
     const afterDot = text.slice(lastDot + 1);
-    if (dotsCount > 1 || (dotsCount === 1 && afterDot.length === 3 && text.length > 5)) {
+
+    if (
+      dotsCount > 1 ||
+      (dotsCount === 1 &&
+        afterDot.length === 3 &&
+        text.length > 5)
+    ) {
       text = text.replace(/\./g, '');
     }
   }
 
   const value = Number(text);
-  return Number.isFinite(value) && value > 0 && value < 1e9 ? Number(value.toFixed(2)) : null;
+
+  return Number.isFinite(value) &&
+    value > 0 &&
+    value < 1e9
+    ? Number(value.toFixed(2))
+    : null;
 }
 
 export function normaliseStock(value) {
   if (value == null) return null;
+
   const text = cleanText(value);
   const lower = text.toLowerCase();
-  if (/out.?of.?stock|sold.?out|unavailable|not.?available|^0$/.test(lower)) {
+
+  if (
+    /out.?of.?stock|sold.?out|unavailable|not.?available|^0$/.test(
+      lower
+    )
+  ) {
     return 'out_of_stock';
   }
-  // If text contains a stock count e.g. "In stock · 200 left" or "137 in stock"
-  if (/in\s+stock|only\s+\d+\s+left|selling\s+fast|hurry|left/i.test(lower)) {
+
+  if (
+    /in\s+stock|only\s+\d+\s+left|selling\s+fast|hurry|left/i.test(
+      lower
+    )
+  ) {
     return text.toUpperCase();
   }
+
   return text;
 }
 
 export function detectCurrency(text) {
   if (!text) return 'INR';
+
   if (text.includes('₹') || /INR/i.test(text)) return 'INR';
   if (text.includes('€') || /EUR/i.test(text)) return 'EUR';
   if (text.includes('$') || /USD/i.test(text)) return 'USD';
   if (text.includes('£') || /GBP/i.test(text)) return 'GBP';
+
   return 'INR';
 }
 
@@ -81,32 +142,58 @@ export function isAllowedStoreUrl(url) {
   try {
     const target = new URL(url);
     const base = new URL(config.storeBaseUrl);
-    return target.protocol === base.protocol && target.host === base.host;
+
+    return (
+      target.protocol === base.protocol &&
+      target.host === base.host
+    );
   } catch {
     return false;
   }
 }
 
 export function assertValid(data) {
-  if (!data) throw new Error('NO_DATA_EXTRACTED');
+  if (!data) {
+    throw new Error('NO_DATA_EXTRACTED');
+  }
+
   if (!isAllowedStoreUrl(data.sourceUrl || data.url)) {
     throw new Error('INVALID_STORE_URL');
   }
-  if (!data.name || typeof data.name !== 'string' || data.name.trim().length < 2) {
+
+  if (
+    !data.name ||
+    typeof data.name !== 'string' ||
+    data.name.trim().length < 2
+  ) {
     throw new Error('INVALID_PRODUCT_NAME');
   }
-  if (data.price == null || !Number.isFinite(data.price) || data.price <= 0) {
+
+  if (
+    data.price == null ||
+    !Number.isFinite(data.price) ||
+    data.price <= 0
+  ) {
     throw new Error('INVALID_PRICE');
   }
-  if (!data.stock || typeof data.stock !== 'string' || data.stock.trim().length === 0) {
+
+  if (
+    !data.stock ||
+    typeof data.stock !== 'string' ||
+    data.stock.trim().length === 0
+  ) {
     throw new Error('INVALID_STOCK');
   }
+
   return data;
 }
 
 export function extractFromHtml(html, url) {
   const $ = cheerio.load(html);
-  const title = cleanText($('h1').first().text()) || cleanText($('title').first().text());
+
+  const title =
+    cleanText($('h1').first().text()) ||
+    cleanText($('title').first().text());
 
   let foundPrice = null;
   let foundCurrency = null;
@@ -115,12 +202,27 @@ export function extractFromHtml(html, url) {
   $('script[type="application/ld+json"]').each((_, el) => {
     try {
       const data = JSON.parse($(el).text());
+
       if (data['@type'] === 'Product') {
-        if (data.offers?.price) foundPrice = parsePrice(data.offers.price);
-        if (data.offers?.priceCurrency) foundCurrency = cleanText(data.offers.priceCurrency);
-        if (data.offers?.availability) foundStock = normaliseStock(data.offers.availability);
+        if (data.offers?.price) {
+          foundPrice = parsePrice(data.offers.price);
+        }
+
+        if (data.offers?.priceCurrency) {
+          foundCurrency = cleanText(
+            data.offers.priceCurrency
+          );
+        }
+
+        if (data.offers?.availability) {
+          foundStock = normaliseStock(
+            data.offers.availability
+          );
+        }
       }
-    } catch {}
+    } catch {
+      // Ignore malformed JSON-LD and continue.
+    }
   });
 
   return {
@@ -136,18 +238,31 @@ export function extractFromHtml(html, url) {
 
 async function tryHttpExtraction(url) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 8000);
+
+  const timer = setTimeout(
+    () => controller.abort(),
+    8000
+  );
+
   try {
     const res = await fetch(url, {
       signal: controller.signal,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) INE-Price-Tracker/1.0',
-        Accept: 'text/html,application/xhtml+xml'
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) INE-Price-Tracker/1.0',
+        Accept:
+          'text/html,application/xhtml+xml'
       }
     });
-    if (!res.ok) throw new Error(`HTTP_${res.status}`);
+
+    if (!res.ok) {
+      throw new Error(`HTTP_${res.status}`);
+    }
+
     const html = await res.text();
+
     const data = extractFromHtml(html, url);
+
     return assertValid(data);
   } finally {
     clearTimeout(timer);
@@ -156,290 +271,644 @@ async function tryHttpExtraction(url) {
 
 async function getTimeOffset() {
   try {
-    const res = await fetch(`${config.storeBaseUrl}/api/challenge`, {
-      headers: { 'User-Agent': 'Mozilla/5.0 INE-Price-Tracker/1.0' }
-    });
+    const res = await fetch(
+      `${config.storeBaseUrl}/api/challenge`,
+      {
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 INE-Price-Tracker/1.0'
+        }
+      }
+    );
+
     if (res.ok) {
       const json = await res.json();
-      if (json.ts) return json.ts - Date.now();
+
+      if (json.ts) {
+        return json.ts - Date.now();
+      }
     }
-  } catch {}
+  } catch {
+    // Fall back to local clock.
+  }
+
   return 0;
 }
 
-async function runBrowserScrapeAttempt(url, options = {}) {
+async function runBrowserScrapeAttempt(
+  url,
+  options = {}
+) {
   const headless = options.headless !== false;
   const slowMo = headless ? 0 : 75;
+
   const timeOffset = await getTimeOffset();
 
   const browser = await chromium.launch({
     headless,
     slowMo,
-    args: ['--disable-blink-features=AutomationControlled', '--no-sandbox']
+    args: [
+      '--disable-blink-features=AutomationControlled',
+      '--no-sandbox'
+    ]
   });
 
   const context = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-    viewport: { width: 1280, height: 800 }
+    userAgent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    viewport: {
+      width: 1280,
+      height: 800
+    }
   });
 
-  // Time synchronization script to ensure challenge timestamps match server clock
   await context.addInitScript((offset) => {
     const origDateNow = Date.now;
+
     Date.now = function () {
       return origDateNow.call(Date) + offset;
     };
   }, timeOffset);
 
   const page = await context.newPage();
-  let interceptedQuote = null;
+
   let serverHttpStatus = null;
 
-  // Intercept responses for price payload and status codes
   page.on('response', async (res) => {
-    if (res.url() === url) serverHttpStatus = res.status();
-    if (res.url().includes('/api/products/') && res.url().includes('/price')) {
+    if (res.url() === url) {
+      serverHttpStatus = res.status();
+    }
+
+    if (
+      res.url().includes('/api/products/') &&
+      res.url().includes('/price')
+    ) {
       if (res.status() === 503) {
-        // upstream 503 error
+        // Upstream price request failed.
       }
     }
   });
 
   try {
-    if (options.delayMs) await sleep(options.delayMs);
+    if (options.delayMs) {
+      await sleep(options.delayMs);
+    }
 
     const navRes = await page.goto(url, {
       waitUntil: 'domcontentloaded',
-      timeout: options.timeoutMs || config.timeoutMs
+      timeout:
+        options.timeoutMs || config.timeoutMs
     });
-    serverHttpStatus = navRes?.status() || serverHttpStatus;
 
-    // Immediately disable disruptive cookie overlays
-    await page.addStyleTag({
-      content: '.cookie-overlay { display: none !important; pointer-events: none !important; }'
-    }).catch(() => {});
-    await page.evaluate(() => { document.body.style.overflow = 'auto'; }).catch(() => {});
+    serverHttpStatus =
+      navRes?.status() || serverHttpStatus;
 
-    // Wait for product details to load
-    await page.waitForSelector('h1', { timeout: 8000 }).catch(() => {});
-    const productName = cleanText(await page.locator('h1').first().innerText().catch(() => ''));
+    await page
+      .addStyleTag({
+        content:
+          '.cookie-overlay { display: none !important; pointer-events: none !important; }'
+      })
+      .catch(() => {});
 
-    // Locate price block
-    const priceBlock = page.locator('.price-block');
-    await priceBlock.waitFor({ timeout: 8000 });
+    await page
+      .evaluate(() => {
+        document.body.style.overflow = 'auto';
+      })
+      .catch(() => {});
 
-    let initialText = cleanText(await priceBlock.innerText());
+    await page
+      .waitForSelector('h1', {
+        timeout: 8000
+      })
+      .catch(() => {});
 
-    // Check if price is in hidden state requiring interaction
-    if (initialText.includes('Price hidden') || initialText.includes('Reveal price')) {
-      options.onProgress?.({ stage: 'interaction', message: 'Price hidden; performing hover and dwell interaction...' });
+    const productName = cleanText(
+      await page
+        .locator('h1')
+        .first()
+        .innerText()
+        .catch(() => '')
+    );
 
-      const box = await priceBlock.boundingBox();
+    const priceBlock =
+      page.locator('.price-block');
+
+    await priceBlock.waitFor({
+      timeout: 8000
+    });
+
+    const initialText = cleanText(
+      await priceBlock.innerText()
+    );
+
+    /*
+     * Hidden-price interaction.
+     */
+    if (
+      initialText.includes('Price hidden') ||
+      initialText.includes('Reveal price')
+    ) {
+      options.onProgress?.({
+        stage: 'interaction',
+        message:
+          'Price hidden; performing hover and dwell interaction...'
+      });
+
+      const box =
+        await priceBlock.boundingBox();
+
       if (box) {
-        await page.mouse.move(box.x + 20, box.y + 20);
+        await page.mouse.move(
+          box.x + 20,
+          box.y + 20
+        );
+
         for (let i = 0; i < 15; i++) {
           await sleep(50);
-          await page.mouse.move(box.x + 25 + i * 15, box.y + 20 + (i % 2) * 10);
+
+          await page.mouse.move(
+            box.x + 25 + i * 15,
+            box.y +
+              20 +
+              (i % 2) * 10
+          );
         }
-        await sleep(700); // Exceed minDwellMs (600ms)
+
+        await sleep(700);
       }
 
-      const revealBtn = page.locator('button:has-text("Reveal price")');
-      await revealBtn.waitFor({ state: 'visible', timeout: 4000 }).catch(() => {});
+      const revealBtn =
+        page.locator(
+          'button:has-text("Reveal price")'
+        );
 
-      if (await revealBtn.isVisible()) {
-        options.onProgress?.({ stage: 'reveal', message: 'Clicking reveal price button...' });
-        await revealBtn.click().catch(() => {});
+      await revealBtn
+        .waitFor({
+          state: 'visible',
+          timeout: 4000
+        })
+        .catch(() => {});
+
+      if (
+        await revealBtn
+          .isVisible()
+          .catch(() => false)
+      ) {
+        options.onProgress?.({
+          stage: 'reveal',
+          message:
+            'Clicking reveal price button...'
+        });
+
+        await revealBtn
+          .click()
+          .catch(() => {});
       }
     }
 
-    // Wait for price resolution or challenge outcome (up to 18 seconds within attempt)
-    const deadline = Date.now() + 18000;
+    /*
+     * Wait for the asynchronous price resolution.
+     */
+    const deadline =
+      Date.now() + 18000;
+
     let extractedData = null;
 
     while (Date.now() < deadline) {
       await sleep(700);
-      const currentText = cleanText(await priceBlock.innerText());
 
-      // If the page is actively loading or retrying internally, let it proceed
-      if (currentText.includes('Retrying (attempt') || currentText.includes('Loading current price') || currentText.includes('Updating…')) {
+      const currentText = cleanText(
+        await priceBlock.innerText()
+      );
+
+      if (
+        currentText.includes(
+          'Retrying (attempt'
+        ) ||
+        currentText.includes(
+          'Loading current price'
+        ) ||
+        currentText.includes('Updating…')
+      ) {
         await sleep(1000);
         continue;
       }
 
-      // Check for final failure condition or challenge error
-      if (currentText.includes("Couldn't load the price") || currentText.includes('challenge_failed')) {
-        const tryAgainBtn = page.locator('button:has-text("Try again")');
-        if (await tryAgainBtn.isVisible().catch(() => false)) {
-          options.onProgress?.({ stage: 'retry_action', message: 'Challenge failure detected; clicking try again...' });
-          await tryAgainBtn.click().catch(() => {});
+      /*
+       * Challenge failure.
+       */
+      if (
+        currentText.includes(
+          "Couldn't load the price"
+        ) ||
+        currentText.includes(
+          'challenge_failed'
+        )
+      ) {
+        const tryAgainBtn =
+          page.locator(
+            'button:has-text("Try again")'
+          );
+
+        if (
+          await tryAgainBtn
+            .isVisible()
+            .catch(() => false)
+        ) {
+          options.onProgress?.({
+            stage: 'retry_action',
+            message:
+              'Challenge failure detected; clicking try again...'
+          });
+
+          await tryAgainBtn
+            .click()
+            .catch(() => {});
+
           await sleep(1500);
           continue;
         }
-        throw new Error(`challenge_failed: ${currentText.replace(/\s+/g, ' ').slice(0, 80)}`);
+
+        throw new Error(
+          `challenge_failed: ${currentText
+            .replace(/\s+/g, ' ')
+            .slice(0, 80)}`
+        );
       }
 
-      // If still showing reveal button due to Xn dropped click, click again
-      const revealBtn = page.locator('button:has-text("Reveal price")');
-      if (await revealBtn.isVisible().catch(() => false) && !await revealBtn.isDisabled().catch(() => true)) {
-        await revealBtn.click().catch(() => {});
+      /*
+       * Reveal button may require another click.
+       */
+      const revealBtn =
+        page.locator(
+          'button:has-text("Reveal price")'
+        );
+
+      if (
+        await revealBtn
+          .isVisible()
+          .catch(() => false) &&
+        !(await revealBtn
+          .isDisabled()
+          .catch(() => true))
+      ) {
+        await revealBtn
+          .click()
+          .catch(() => {});
+
         continue;
       }
 
-      // Check if price loaded successfully
-      const hasPriceSuccess = await page.locator('.price-success').count().then((c) => c > 0).catch(() => false);
-      const looksLoaded = hasPriceSuccess || currentText.includes('ratings') || currentText.includes('in stock') || currentText.includes('out of stock') || currentText.includes('% off');
+      /*
+       * Determine whether the price has loaded.
+       */
+      const hasPriceSuccess =
+        await page
+          .locator('.price-success')
+          .count()
+          .then((c) => c > 0)
+          .catch(() => false);
 
-      if (looksLoaded) {
-        // Extract real price and stock from DOM
-    const domResult = await page.evaluate(() => {
-  const priceBlock = document.querySelector('.price-block');
-  const priceMain = document.querySelector('.price-main');
+      const looksLoaded =
+        hasPriceSuccess ||
+        currentText.includes('ratings') ||
+        currentText.includes('in stock') ||
+        currentText.includes('out of stock') ||
+        currentText.includes('% off');
 
-  if (!priceBlock) return null;
-
-  // The live/current price is marked by data-price="true" on the
-  // INE storefront. Prefer that exact element.
-  const dataPrice = priceBlock.querySelector('[data-price="true"]');
-
-  if (dataPrice) {
-    const style = window.getComputedStyle(dataPrice);
-
-    const visible =
-      style.display !== 'none' &&
-      style.visibility !== 'hidden' &&
-      style.opacity !== '0' &&
-      dataPrice.getAttribute('aria-hidden') !== 'true';
-
-    if (visible) {
-      const text = (
-        dataPrice.innerText ||
-        dataPrice.textContent ||
-        ''
-      ).trim();
-
-      if (text) {
-        const stockBadge = document.querySelector('.stock-badge');
-
-        return {
-          rawPriceText: text,
-          rawStockText: stockBadge
-            ? (stockBadge.innerText || stockBadge.textContent || '').trim()
-            : null,
-          priceBlockText: priceBlock.innerText || ''
-        };
+      if (!looksLoaded) {
+        continue;
       }
-    }
-  }
 
-  // Fallback: look for a visible monetary value in the price block.
-  const text = priceMain?.innerText || priceBlock.innerText || '';
+      /*
+       * Extract price, stock AND structure snapshot.
+       */
+      const domResult =
+        await page.evaluate(() => {
+          const priceBlock =
+            document.querySelector(
+              '.price-block'
+            );
 
-  // Prefer values with an explicit currency symbol.
-  const currencyMatch = text.match(
-    /(?:₹|€|\$|£)\s*[\d,]+(?:\.\d{1,2})?/ 
-  );
+          const priceMain =
+            document.querySelector(
+              '.price-main'
+            );
 
-  if (currencyMatch) {
-    const stockBadge = document.querySelector('.stock-badge');
-
-    return {
-      rawPriceText: currencyMatch[0],
-      rawStockText: stockBadge
-        ? (stockBadge.innerText || stockBadge.textContent || '').trim()
-        : null,
-      priceBlockText: text
-    };
-  }
-
-  return null;
-});
-
-        if (domResult?.rawPriceText) {
-          const parsed = parsePrice(domResult.rawPriceText);
-         const currency = detectCurrency(
-  `${domResult.rawPriceText || ''} ${domResult.priceBlockText || ''}`
-);
-          const stock = normaliseStock(domResult.rawStockText) || 'in_stock';
-
-          if (parsed != null && parsed > 0) {
-            extractedData = {
-              sourceUrl: url,
-              url,
-              name: productName || 'INE Product',
-              price: parsed,
-              currency,
-              stock,
-              imageUrl: null
-            };
-            break;
+          if (!priceBlock) {
+            return null;
           }
+
+          /*
+           * The live/current price is marked with
+           * data-price="true" on the INE storefront.
+           */
+          const dataPrice =
+            priceBlock.querySelector(
+              '[data-price="true"]'
+            );
+
+          const stockBadge =
+            document.querySelector(
+              '.stock-badge'
+            );
+
+          /*
+           * Structure snapshot is deliberately based
+           * on selectors/elements, not dynamic values.
+           */
+          const structure = {
+            selectors: [
+              '.price-block',
+              '.price-main',
+              '[data-price="true"]',
+              '.stock-badge'
+            ],
+
+            priceTag:
+              dataPrice?.tagName || null,
+
+            priceClass:
+              dataPrice?.className || null,
+
+            stockTag:
+              stockBadge?.tagName || null,
+
+            stockClass:
+              stockBadge?.className || null,
+
+            hasPriceBlock:
+              Boolean(priceBlock),
+
+            hasDataPrice:
+              Boolean(dataPrice),
+
+            hasStockBadge:
+              Boolean(stockBadge)
+          };
+
+          /*
+           * Prefer exact current-price element.
+           */
+          if (dataPrice) {
+            const style =
+              window.getComputedStyle(
+                dataPrice
+              );
+
+            const visible =
+              style.display !== 'none' &&
+              style.visibility !== 'hidden' &&
+              style.opacity !== '0' &&
+              dataPrice.getAttribute(
+                'aria-hidden'
+              ) !== 'true';
+
+            if (visible) {
+              const text = (
+                dataPrice.innerText ||
+                dataPrice.textContent ||
+                ''
+              ).trim();
+
+              if (text) {
+                return {
+                  rawPriceText: text,
+
+                  rawStockText:
+                    stockBadge
+                      ? (
+                          stockBadge.innerText ||
+                          stockBadge.textContent ||
+                          ''
+                        ).trim()
+                      : null,
+
+                  priceBlockText:
+                    priceBlock.innerText || '',
+
+                  structure
+                };
+              }
+            }
+          }
+
+          /*
+           * Fallback: only look for a monetary value
+           * inside the price block.
+           */
+          const text =
+            priceMain?.innerText ||
+            priceBlock.innerText ||
+            '';
+
+          /*
+           * Require an explicit currency symbol.
+           * This prevents unrelated numbers such as
+           * "Loaded in 1 attempt" becoming the price.
+           */
+          const currencyMatch =
+            text.match(
+              /(?:₹|€|\$|£)\s*[\d,]+(?:\.\d{1,2})?/
+            );
+
+          if (currencyMatch) {
+            return {
+              rawPriceText:
+                currencyMatch[0],
+
+              rawStockText:
+                stockBadge
+                  ? (
+                      stockBadge.innerText ||
+                      stockBadge.textContent ||
+                      ''
+                    ).trim()
+                  : null,
+
+              priceBlockText: text,
+
+              structure
+            };
+          }
+
+          return null;
+        });
+
+      if (domResult?.rawPriceText) {
+        const parsed = parsePrice(
+          domResult.rawPriceText
+        );
+
+        const currency =
+          detectCurrency(
+            `${domResult.rawPriceText || ''} ${
+              domResult.priceBlockText || ''
+            }`
+          );
+
+        const stock =
+          normaliseStock(
+            domResult.rawStockText
+          ) || 'in_stock';
+
+        /*
+         * Never accept a number unless it was
+         * successfully parsed from the price element.
+         */
+        if (
+          parsed != null &&
+          parsed > 0
+        ) {
+          extractedData = {
+            sourceUrl: url,
+            url,
+            name:
+              productName ||
+              'INE Product',
+            price: parsed,
+            currency,
+            stock,
+            imageUrl: null,
+
+            /*
+             * Used by server.js for structure
+             * change detection.
+             */
+            structure:
+              domResult.structure || null
+          };
+
+          break;
         }
       }
     }
 
     if (!extractedData) {
-      throw new Error('PRICE_NOT_FOUND_AFTER_INTERACTION');
+      throw new Error(
+        'PRICE_NOT_FOUND_AFTER_INTERACTION'
+      );
     }
 
     return {
       data: assertValid(extractedData),
-      httpStatus: serverHttpStatus || 200,
+      httpStatus:
+        serverHttpStatus || 200,
       method: 'playwright'
     };
   } finally {
-    await context.close().catch(() => {});
-    await browser.close().catch(() => {});
+    await context
+      .close()
+      .catch(() => {});
+
+    await browser
+      .close()
+      .catch(() => {});
   }
 }
 
-export async function scrapeProduct(url, options = {}) {
+export async function scrapeProduct(
+  url,
+  options = {}
+) {
   if (!isAllowedStoreUrl(url)) {
-    throw new Error('STORE_URL_NOT_ALLOWED');
+    throw new Error(
+      'STORE_URL_NOT_ALLOWED'
+    );
   }
 
   const started = Date.now();
   const attempts = [];
-  let lastError = null;
-  const maxAttempts = options.maxAttempts || config.maxAttempts || 3;
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const attemptStarted = Date.now();
+  let lastError = null;
+
+  const maxAttempts =
+    options.maxAttempts ||
+    config.maxAttempts ||
+    3;
+
+  for (
+    let attempt = 1;
+    attempt <= maxAttempts;
+    attempt++
+  ) {
+    const attemptStarted =
+      Date.now();
+
     options.onProgress?.({
       attempt,
       maxAttempts,
       stage: 'starting',
-      message: `[${attempt}/${maxAttempts}] Navigating to ${url}...`
+      message:
+        `[${attempt}/${maxAttempts}] Navigating to ${url}...`
     });
 
     try {
-      if (options.failOnce && attempt === 1) {
-        throw new Error('DEMO_FAIL_SIMULATED: First navigation failed by demonstration harness');
+      /*
+       * Optional demonstration harness.
+       */
+      if (
+        options.failOnce &&
+        attempt === 1
+      ) {
+        throw new Error(
+          'DEMO_FAIL_SIMULATED: First navigation failed by demonstration harness'
+        );
       }
 
-      // 1. First attempt fast lightweight HTTP parse (if structured data exists)
+      /*
+       * First try lightweight HTTP extraction.
+       * If structured data is not sufficient,
+       * use Playwright.
+       */
       let result;
+
       try {
-        const httpData = await tryHttpExtraction(url);
-        result = { data: httpData, httpStatus: 200, method: 'http' };
+        const httpData =
+          await tryHttpExtraction(url);
+
+        result = {
+          data: httpData,
+          httpStatus: 200,
+          method: 'http'
+        };
+
         attempts.push({
           attempt,
           method: 'http',
           status: 'success',
-          message: 'HTTP extraction succeeded.',
+          message:
+            'HTTP extraction succeeded.',
           httpStatus: 200,
-          durationMs: Date.now() - attemptStarted
+          durationMs:
+            Date.now() -
+            attemptStarted
         });
       } catch {
-        // Fall back to Playwright browser interaction
-        result = await runBrowserScrapeAttempt(url, { ...options, attempt });
+        /*
+         * Real JavaScript interaction is required
+         * for the difficult storefront pages.
+         */
+        result =
+          await runBrowserScrapeAttempt(
+            url,
+            {
+              ...options,
+              attempt
+            }
+          );
+
         attempts.push({
           attempt,
           method: 'playwright',
           status: 'success',
-          message: `Browser extraction succeeded (${result.data.currency} ${result.data.price}, ${result.data.stock}).`,
-          httpStatus: result.httpStatus,
-          durationMs: Date.now() - attemptStarted
+          message:
+            `Browser extraction succeeded (${result.data.currency} ${result.data.price}, ${result.data.stock}).`,
+          httpStatus:
+            result.httpStatus,
+          durationMs:
+            Date.now() -
+            attemptStarted
         });
       }
 
@@ -447,20 +916,29 @@ export async function scrapeProduct(url, options = {}) {
         attempt,
         maxAttempts,
         stage: 'success',
-        message: `[${attempt}/${maxAttempts}] Price found: ${result.data.currency} ${result.data.price} (${result.data.stock})`
+        message:
+          `[${attempt}/${maxAttempts}] Price found: ${result.data.currency} ${result.data.price} (${result.data.stock})`
       });
 
       return {
         ...result,
         attempt,
         attempts,
-        durationMs: Date.now() - started
+        durationMs:
+          Date.now() - started
       };
     } catch (err) {
       lastError = err;
-      const isLast = attempt === maxAttempts;
-      const status = isLast ? 'failed' : 'retried';
-      const errMsg = err.message || 'Scrape attempt failed';
+
+      const isLast =
+        attempt === maxAttempts;
+
+      const status =
+        isLast ? 'failed' : 'retried';
+
+      const errMsg =
+        err.message ||
+        'Scrape attempt failed';
 
       attempts.push({
         attempt,
@@ -468,29 +946,63 @@ export async function scrapeProduct(url, options = {}) {
         status,
         message: errMsg,
         httpStatus: null,
-        durationMs: Date.now() - attemptStarted
+        durationMs:
+          Date.now() -
+          attemptStarted
       });
 
       options.onProgress?.({
         attempt,
         maxAttempts,
         stage: status,
-        message: `[${attempt}/${maxAttempts}] ${errMsg}${isLast ? ' (Final attempt failed)' : ' (Retrying...)'}`
+        message:
+          `[${attempt}/${maxAttempts}] ${errMsg}${
+            isLast
+              ? ' (Final attempt failed)'
+              : ' (Retrying...)'
+          }`
       });
 
+      /*
+       * Exponential backoff with small jitter.
+       */
       if (!isLast) {
-        const backoffMs = Math.min(6000, 1000 * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 250));
+        const backoffMs =
+          Math.min(
+            6000,
+            1000 *
+              Math.pow(
+                2,
+                attempt - 1
+              ) +
+              Math.floor(
+                Math.random() * 250
+              )
+          );
+
         await sleep(backoffMs);
       }
     }
   }
 
-  const finalError = new Error(lastError?.message || 'SCRAPE_FAILED');
+  const finalError =
+    new Error(
+      lastError?.message ||
+        'SCRAPE_FAILED'
+    );
+
   finalError.attempts = attempts;
-  finalError.durationMs = Date.now() - started;
+  finalError.durationMs =
+    Date.now() - started;
+
   throw finalError;
 }
 
-export async function discoverProducts(query) {
-  return await searchCatalog(query, 25);
+export async function discoverProducts(
+  query
+) {
+  return await searchCatalog(
+    query,
+    25
+  );
 }
